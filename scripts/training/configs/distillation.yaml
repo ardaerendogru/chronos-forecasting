@@ -1,4 +1,4 @@
-teacher_model_path: "amazon/chronos-t5-mini"
+teacher_model_path: "amazon/chronos-t5-large"
 temperature: 2.0
 model_id: "google/t5-efficient-mini"
 training_data_paths: ["../../data/tsmixup-data.arrow", "../../data/kernelsynth-data.arrow"]
@@ -33,7 +33,7 @@ dataloader_num_workers: 1
 max_missing_prop: 0.9
 use_eos_token: true
 
-alpha: 0
-student_hidden_size: 384  # Adjust based on your student model
-teacher_hidden_size: 384  # Adjust based on your teacher model
-distill_temperature: 0.1
+alpha: 0.5
+student_hidden_size: 384  #{tiny:256, mini:384, small:512, base:768, large:1024, }
+teacher_hidden_size: 1024  
+distill_temperature: 2

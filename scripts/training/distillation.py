@@ -47,7 +47,15 @@ class DistillationTrainer(Trainer):
         self.criterion = nn.CrossEntropyLoss(ignore_index=-100)
         # Get model dtype from the student model
         model_dtype = next(self.model.parameters()).dtype
-        
+        self._running_losses = {
+                    'task_loss': 0.0,
+                    'distill_total': 0.0,
+                    'soft_targets': 0.0,
+                    'encoder': 0.0,
+                    'decoder': 0.0,
+                    'total': 0.0,
+                    'count': 0
+                }
         # Initialize projection heads with matching dtype
         self.encoder_projection = nn.Linear(
             student_hidden_size,
@@ -58,7 +66,12 @@ class DistillationTrainer(Trainer):
             student_hidden_size,
             teacher_hidden_size,
         ).to(device=self.model.device, dtype=model_dtype)
-        
+        self.model.encoder_projection = self.encoder_projection
+        self.model.decoder_projection = self.decoder_projection
+        for name, param in self.encoder_projection.named_parameters():
+            assert param.requires_grad, f"Encoder projection param {name} requires_grad is False"
+        for name, param in self.decoder_projection.named_parameters():
+            assert param.requires_grad, f"Decoder projection param {name} requires_grad is False"
     def get_model_outputs(self, model, inputs, is_teacher=False):
         """Get all relevant outputs from a model"""
         if hasattr(model, 'model'):
@@ -93,95 +106,78 @@ class DistillationTrainer(Trainer):
         
         # Get student outputs
         student_outputs = self.get_model_outputs(model, inputs, is_teacher=False)
-        
-        # 1. Task-specific loss
-        labels = inputs['labels']  # Shape: [batch_size, seq_len]
-        logits = student_outputs['logits']
-        labels = labels.contiguous().view(-1)
-        logits = logits.contiguous().view(-1, logits.size(-1))
-        # # Debug prints
-        # print("Labels shape:", labels.shape)
-        # print("Logits shape:", logits.shape)
-        # print("Unique label values:", torch.unique(labels))
-        # print("Label range:", labels.min().item(), "to", labels.max().item())
-        # print("Vocab size:", logits.size(-1))
-        
-        # Compute cross entropy loss
-        task_loss = self.criterion(
-            logits,
-            labels,
-        )
-        
 
-        
+        task_loss = student_outputs['loss']
+
         # Soft targets loss on logits
         T = self.temperature
-        # Get log softmax of student outputs with temperature
         student_lsm = F.log_softmax(student_outputs['logits'] / T, dim=-1)
-        # Get softmax of teacher outputs with temperature
         teacher_probs = F.softmax(teacher_outputs['logits'] / T, dim=-1)
-        
-        # Compute DINO loss
         distill_loss = -(teacher_probs * student_lsm).sum(dim=-1).mean()
-        
+
+        # Hidden state losses
         student_encoder = F.normalize(student_outputs['encoder_output'], p=2, dim=-1)
         teacher_encoder = F.normalize(teacher_outputs['encoder_output'], p=2, dim=-1)
         student_decoder = F.normalize(student_outputs['decoder_output'], p=2, dim=-1)
         teacher_decoder = F.normalize(teacher_outputs['decoder_output'], p=2, dim=-1)
-        # Hidden state losses
         B = student_encoder.size(0)
-        encoder_loss = F.mse_loss(
-            student_encoder,
-            teacher_encoder,
-            reduction='sum'
-        )/B
-        
-        decoder_loss = F.mse_loss(
-            student_decoder,
-            teacher_decoder,
-            reduction='sum'
-        )/B
-        
-        # Combine all distillation losses
+        encoder_loss = F.mse_loss(student_encoder, teacher_encoder, reduction='sum') / B
+        decoder_loss = F.mse_loss(student_decoder, teacher_decoder, reduction='sum') / B
+
+        # Combine all distillation losses BEFORE scaling
         total_distill_loss = (
-            0.6 * distill_loss +    # Soft targets
-            0.2 * encoder_loss +    # Encoder states
-            0.2 * decoder_loss      # Decoder states
+            1 * distill_loss +    # Soft targets
+            0 * encoder_loss +    # Encoder states
+            0 * decoder_loss      # Decoder states
         )
-        
+
+        # Scale losses if gradient accumulation is used
+        if self.args.gradient_accumulation_steps > 1:
+            scale = 1.0 / self.args.gradient_accumulation_steps
+            task_loss = task_loss * scale
+            total_distill_loss = total_distill_loss * scale
+
         # Final loss combining task and distillation
         total_loss = (
             self.alpha * task_loss + 
             (1 - self.alpha) * total_distill_loss
         )
-        total_loss = total_loss
-            # Log the loss components
-        if self.args.logging_steps > 0 and self.state.global_step % self.args.logging_steps == 0:
+           
+        # Update running averages
+        self._running_losses['task_loss'] += task_loss.item()
+        self._running_losses['distill_total'] += total_distill_loss.item()
+        self._running_losses['soft_targets'] += distill_loss.item()
+        self._running_losses['encoder'] += encoder_loss.item()
+        self._running_losses['decoder'] += decoder_loss.item()
+        self._running_losses['total'] += total_loss.item()
+        self._running_losses['count'] += 1
+            
+        # Log the loss components with running averages
+        if self.args.logging_steps > 0 and self.state.global_step % self.args.logging_steps == 0 and self.state.global_step > 1:
+            # Initialize running averages if they don't exist
+                
+ 
+            # Log averaged values
             self.log({
-            "task_loss": task_loss.item(),
-            "distill_loss/total": total_distill_loss.item(),
-            "distill_loss/soft_targets": distill_loss.item(),
-            "distill_loss/encoder": encoder_loss.item(),
-            "distill_loss/decoder": decoder_loss.item(),
-            "loss/total": total_loss.item()
-        })
+                "task_loss": self._running_losses['task_loss'] / self._running_losses['count'],
+                "distill_loss/total": self._running_losses['distill_total'] / self._running_losses['count'],
+                "distill_loss/soft_targets": self._running_losses['soft_targets'] / self._running_losses['count'],
+                "distill_loss/encoder": self._running_losses['encoder'] / self._running_losses['count'],
+                "distill_loss/decoder": self._running_losses['decoder'] / self._running_losses['count'],
+                "loss/total": self._running_losses['total'] / self._running_losses['count']
+            })
+            
+            # Reset running averages after logging
+            self._running_losses = {k: 0.0 for k in self._running_losses}
 
-        
         return (total_loss, student_outputs) if return_outputs else total_loss
     def create_optimizer(self):
         """Override to include projection heads in optimization"""
         if self.optimizer is None:
-            opt_model = self.model
-            
-            # Add projection heads to the parameters being optimized
-            opt_model.projection_heads = nn.ModuleList([
-                self.encoder_projection,
-                self.decoder_projection
-            ])
-            # Get all parameters that require gradients
+            # Projection heads are already part of the model
             optimizer_grouped_parameters = [
                 {
-                    "params": [p for p in opt_model.parameters() if p.requires_grad],
+                    "params": [p for p in self.model.parameters() if p.requires_grad],
                     "weight_decay": self.args.weight_decay,
                 }
             ]
@@ -192,7 +188,7 @@ class DistillationTrainer(Trainer):
                 "adamw_torch_fused": torch.optim.AdamW,
                 "adamw_apex_fused": torch.optim.AdamW,
                 "adamw_anyprecision": torch.optim.AdamW,
-            }[self.args.optim]
+            }.get(self.args.optim, torch.optim.AdamW)  # Default to AdamW if not found
             
             self.optimizer = optimizer_cls(
                 optimizer_grouped_parameters,
@@ -201,8 +197,10 @@ class DistillationTrainer(Trainer):
                 eps=1e-8,
                 weight_decay=self.args.weight_decay,
             )
-
+        
         return self.optimizer
+
+    
     def save_model(self, output_dir=None, _internal_call=False):
         """Save model including projection heads"""
         # First save the main model
@@ -238,7 +236,7 @@ def main(
     learning_rate: float = 1e-3,
     optim: str = "adamw_torch_fused",
     shuffle_buffer_length: int = 100,
-    gradient_accumulation_steps: int = 2,
+    gradient_accumulation_steps: int = 1,
     
     # Model parameters
     model_id: str = "google/t5-efficient-tiny",  # Student model
