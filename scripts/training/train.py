@@ -48,7 +48,9 @@ from chronos import ChronosConfig, ChronosTokenizer
 
 
 app = typer.Typer(pretty_exceptions_enable=False)
-
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__file__)
+logger.setLevel(logging.INFO)
 
 def is_main_process() -> bool:
     """
@@ -696,7 +698,5 @@ def main(
 
 
 if __name__ == "__main__":
-    logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-    logger = logging.getLogger(__file__)
-    logger.setLevel(logging.INFO)
+
     app()
