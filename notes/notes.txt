@@ -1,0 +1,7 @@
+graph LR
+    A[Input Time Series] --> B[Tokenizer]
+    B --> C[T5 Encoder]
+    C --> D[T5 Decoder]
+    D --> E[Output Tokens]
+    E --> F[Detokenizer]
+    F --> G[Forecasts]

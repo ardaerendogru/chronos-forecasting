@@ -343,7 +343,7 @@ class ChronosModel(nn.Module):
             top_k = self.config.top_k
         if top_p is None:
             top_p = self.config.top_p
-
+        
         preds = self.model.generate(
             input_ids=input_ids,
             attention_mask=attention_mask,
