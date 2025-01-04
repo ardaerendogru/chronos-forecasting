@@ -166,3 +166,4 @@ cython_debug/
 notebooks/output/
 data/*
 scripts/training/output/*
+notebooks/*.yaml
