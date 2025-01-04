@@ -5,3 +5,27 @@ graph LR
     D --> E[Output Tokens]
     E --> F[Detokenizer]
     F --> G[Forecasts]
+
+
+# only kl loss
+    Passing a tuple of `past_key_values` is deprecated and will be removed in Transformers v4.48.0. You should pass an instance of `EncoderDecoderCache` instead, e.g. `past_key_values=EncoderDecoderCache.from_legacy_cache(past_key_values)`.
+{'loss': 7.0411, 'grad_norm': 0.11376953125, 'learning_rate': 0.0009975000000000001, 'epoch': 0.0}                                                
+{'task_loss': 6.680701097804391, 'distill_loss/total': 7.398827345309381, 'distill_loss/soft_targets': 7.398827345309381, 'distill_loss/encoder': 1017.7884231536926, 'distill_loss/decoder': 131.17365269461078, 'loss/total': 7.0399825349301395, 'epoch': 0.0}
+{'loss': 6.3494, 'grad_norm': 0.1259765625, 'learning_rate': 0.000995, 'epoch': 0.01}                                                             
+{'task_loss': 5.850375, 'distill_loss/total': 6.847125, 'distill_loss/soft_targets': 6.847125, 'distill_loss/encoder': 1016.168, 'distill_loss/decoder': 131.642, 'loss/total': 6.3489375, 'epoch': 0.01}
+
+{'loss': 0.8065, 'grad_norm': 0.0169677734375, 'learning_rate': 0.0009975000000000001, 'epoch': 0.0}                                              
+{'task_loss': 7.150573852295409, 'distill_loss/total': 0.7523234780439122, 'distill_loss/soft_targets': 7.6999750499002, 'distill_loss/encoder': 614.1397205588822, 'distill_loss/decoder': 49.72629740518962, 'loss/total': 0.8062702719560878, 'epoch': 0.0}
+{'loss': 0.6808, 'grad_norm': 0.02294921875, 'learning_rate': 0.000995, 'epoch': 0.01}                                                            
+{'task_loss': 5.801125, 'distill_loss/total': 0.6636796875, 'distill_loss/soft_targets': 6.9206875, 'distill_loss/encoder': 524.78, 'distill_loss/decoder': 39.593, 'loss/total': 0.6807265625, 'epoch': 0.01}
+{'loss': 0.6577, 'grad_norm': 0.0299072265625, 'learning_rate': 0.0009925000000000001, 'epoch': 0.01}                                             
+{'task_loss': 5.5864375, 'distill_loss/total': 0.6441171875, 'distill_loss/soft_targets': 6.805, 'distill_loss/encoder': 488.18, 'distill_loss/decoder': 36.9105, 'loss/total': 0.6576484375, 'epoch': 0.01}
+
+
+{'grad_norm/task': 0.01104736328125, 'grad_norm/soft_targets': 0.0029754638671875, 'grad_norm/encoder': 106.0, 'grad_norm/decoder': 9.5625, 'epoch': 0}
+{'grad_weight/task': 9.584426879882812e-05, 'grad_weight/soft_targets': 2.574920654296875e-05, 'grad_weight/encoder': 0.91796875, 'grad_weight/decoder': 0.0830078125, 'epoch': 0}
+{'loss': 542.2, 'grad_norm': 16.625, 'learning_rate': 0.00099995, 'epoch': 0.0}                                     
+{'grad_norm/task': 0.007537841796875, 'grad_norm/soft_targets': 0.002655029296875, 'grad_norm/encoder': 45.25, 'grad_norm/decoder': 12.0625, 'epoch': 0.0}
+{'grad_weight/task': 0.0001316070556640625, 'grad_weight/soft_targets': 4.649162292480469e-05, 'grad_weight/encoder': 0.7890625, 'grad_weight/decoder': 0.2109375, 'epoch': 0.0}
+{'task_loss': 8.3125, 'distill_loss/total': 717.4545454545455, 'distill_loss/soft_targets': 8.3125, 'distill_loss/encoder': 884.7272727272727, 'distill_loss/decoder': 94.4090909090909, 'loss/total': 537.6363636363636, 'epoch': 0.0}
+  0%|                                                                        | 17/200000 [00:53<83:47:49,  1.51s/it]

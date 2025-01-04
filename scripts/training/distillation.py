@@ -39,23 +39,42 @@ logger.setLevel(logging.INFO)
 class DistillationTrainer(Trainer):
     """Custom trainer for knowledge distillation"""
     
-    def __init__(self, teacher_model=None, alpha=0.75, temperature=0.1, student_hidden_size=256, teacher_hidden_size=512, **kwargs):
+    def __init__(self, teacher_model=None, alpha=0.75, temperature=0.1, student_hidden_size=256, teacher_hidden_size=512, kl_loss_weight=0.5, encoder_loss_weight=0.25, decoder_loss_weight=0.25, task_loss_weight=0.5, **kwargs):
         super().__init__(**kwargs)
         self.teacher_model = teacher_model
         self.alpha = alpha
         self.temperature = temperature
         self.criterion = nn.CrossEntropyLoss(ignore_index=-100)
+        self.kl_loss_weight = kl_loss_weight
+        self.encoder_loss_weight = encoder_loss_weight
+        self.decoder_loss_weight = decoder_loss_weight
+        self.task_loss_weight = task_loss_weight
         # Get model dtype from the student model
         model_dtype = next(self.model.parameters()).dtype
         self._running_losses = {
                     'task_loss': 0.0,
+                    'task_loss_normalized': 0.0,
                     'distill_total': 0.0,
                     'soft_targets': 0.0,
+                    'soft_targets_normalized': 0.0,
                     'encoder': 0.0,
+                    'encoder_normalized': 0.0,
                     'decoder': 0.0,
+                    'decoder_normalized': 0.0,
                     'total': 0.0,
-                    'count': 0
+                    'count': 0,
+                    'kl_loss_weight': 0.0,
+                    'encoder_loss_weight': 0.0,
+                    'decoder_loss_weight': 0.0,
+                    'task_loss_weight': 0.0,
                 }
+        self._first_losses ={
+            'task_loss': 0.0,
+            'soft_targets': 0.0,
+            'encoder': 0.0,
+            'decoder': 0.0,
+        }
+        self.flag = False
         # Initialize projection heads with matching dtype
         self.encoder_projection = nn.Linear(
             student_hidden_size,
@@ -66,8 +85,8 @@ class DistillationTrainer(Trainer):
             student_hidden_size,
             teacher_hidden_size,
         ).to(device=self.model.device, dtype=model_dtype)
-        self.model.encoder_projection = self.encoder_projection
-        self.model.decoder_projection = self.decoder_projection
+        # self.model.encodear_projection = self.encoder_projection
+        # self.model.decoder_projection = self.decoder_projection
         for name, param in self.encoder_projection.named_parameters():
             assert param.requires_grad, f"Encoder projection param {name} requires_grad is False"
         for name, param in self.decoder_projection.named_parameters():
@@ -123,40 +142,69 @@ class DistillationTrainer(Trainer):
         B = student_encoder.size(0)
         encoder_loss = F.mse_loss(student_encoder, teacher_encoder, reduction='sum') / B
         decoder_loss = F.mse_loss(student_decoder, teacher_decoder, reduction='sum') / B
-
+        if self.flag == False:
+            self._first_losses['task_loss'] = task_loss.item()
+            self._first_losses['soft_targets'] = distill_loss.item()
+            self._first_losses['encoder'] = encoder_loss.item()
+            self._first_losses['decoder'] = decoder_loss.item()
+            self.flag = True
+        
+        task_loss_normalized = task_loss / self._first_losses['task_loss']
+        distill_loss_normalized = distill_loss / self._first_losses['soft_targets']
+        encoder_loss_normalized = encoder_loss / self._first_losses['encoder']
+        decoder_loss_normalized = decoder_loss / self._first_losses['decoder']
+        total_normalized = (task_loss_normalized + distill_loss_normalized + encoder_loss_normalized + decoder_loss_normalized)/4
+        task_loss_weight = task_loss_normalized / total_normalized
+        kl_loss_weight = distill_loss_normalized / total_normalized
+        encoder_loss_weight = encoder_loss_normalized / total_normalized
+        decoder_loss_weight = decoder_loss_normalized / total_normalized
         # Combine all distillation losses BEFORE scaling
         total_distill_loss = (
-            1 * distill_loss +    # Soft targets
-            0 * encoder_loss +    # Encoder states
-            0 * decoder_loss      # Decoder states
+            kl_loss_weight * distill_loss_normalized +    # Soft targets
+            encoder_loss_weight * encoder_loss_normalized +    # Encoder states
+            decoder_loss_weight * decoder_loss_normalized      # Decoder states
         )
 
-        # Scale losses if gradient accumulation is used
-        if self.args.gradient_accumulation_steps > 1:
-            scale = 1.0 / self.args.gradient_accumulation_steps
-            task_loss = task_loss * scale
-            total_distill_loss = total_distill_loss * scale
-
+   
         # Final loss combining task and distillation
         total_loss = (
-            self.alpha * task_loss + 
-            (1 - self.alpha) * total_distill_loss
+            task_loss_weight * task_loss_normalized + 
+            kl_loss_weight * distill_loss_normalized +
+            encoder_loss_weight * encoder_loss_normalized +
+            decoder_loss_weight * decoder_loss_normalized
         )
+             # Scale losses if gradient accumulation is used
+        if self.args.gradient_accumulation_steps > 1:
+            scale = 1.0 / self.args.gradient_accumulation_steps
+            total_loss = total_loss * scale
            
         # Update running averages
         self._running_losses['task_loss'] += task_loss.item()
+        self._running_losses['task_loss_normalized'] += task_loss_normalized.item()
         self._running_losses['distill_total'] += total_distill_loss.item()
         self._running_losses['soft_targets'] += distill_loss.item()
+        self._running_losses['soft_targets_normalized'] += distill_loss_normalized.item()
         self._running_losses['encoder'] += encoder_loss.item()
+        self._running_losses['encoder_normalized'] += encoder_loss_normalized.item()
         self._running_losses['decoder'] += decoder_loss.item()
+        self._running_losses['decoder_normalized'] += decoder_loss_normalized.item()
         self._running_losses['total'] += total_loss.item()
+        self._running_losses['task_loss_weight'] += task_loss_weight.item()
+        self._running_losses['kl_loss_weight'] += kl_loss_weight.item()
+        self._running_losses['encoder_loss_weight'] += encoder_loss_weight.item()
+        self._running_losses['decoder_loss_weight'] += decoder_loss_weight.item()
         self._running_losses['count'] += 1
-            
+        
         # Log the loss components with running averages
-        if self.args.logging_steps > 0 and self.state.global_step % self.args.logging_steps == 0 and self.state.global_step > 1:
-            # Initialize running averages if they don't exist
-                
- 
+        # Add check for gradient accumulation completion
+        is_accumulation_complete = (
+        (self.state.global_step) % self.args.gradient_accumulation_steps == 0
+    )
+        if (self.args.logging_steps > 0 and 
+            self.state.global_step % self.args.logging_steps == 0 and 
+            self.state.global_step > 1 and
+            is_accumulation_complete):  # Only log when accumulation is complete
+            
             # Log averaged values
             self.log({
                 "task_loss": self._running_losses['task_loss'] / self._running_losses['count'],
@@ -164,7 +212,12 @@ class DistillationTrainer(Trainer):
                 "distill_loss/soft_targets": self._running_losses['soft_targets'] / self._running_losses['count'],
                 "distill_loss/encoder": self._running_losses['encoder'] / self._running_losses['count'],
                 "distill_loss/decoder": self._running_losses['decoder'] / self._running_losses['count'],
-                "loss/total": self._running_losses['total'] / self._running_losses['count']
+                "loss/total": self._running_losses['total'] / self._running_losses['count'],
+                "task_loss_normalized": self._running_losses['task_loss_normalized'] / self._running_losses['count'],
+                "task_loss_weight": self._running_losses['task_loss_weight'] / self._running_losses['count'],
+                "kl_loss_weight": self._running_losses['kl_loss_weight'] / self._running_losses['count'],
+                "encoder_loss_weight": self._running_losses['encoder_loss_weight'] / self._running_losses['count'],
+                "decoder_loss_weight": self._running_losses['decoder_loss_weight'] / self._running_losses['count'],
             })
             
             # Reset running averages after logging
@@ -177,7 +230,7 @@ class DistillationTrainer(Trainer):
             # Projection heads are already part of the model
             optimizer_grouped_parameters = [
                 {
-                    "params": [p for p in self.model.parameters() if p.requires_grad],
+                    "params": [p for p in self.model.parameters() if p.requires_grad] + [p for p in self.encoder_projection.parameters() if p.requires_grad] + [p for p in self.decoder_projection.parameters() if p.requires_grad],
                     "weight_decay": self.args.weight_decay,
                 }
             ]
@@ -279,6 +332,10 @@ def main(
     teacher_hidden_size: int = 512,  # Hidden size of teacher model
     # Random seed
     seed: Optional[int] = None,
+    task_loss_weight: float = 0.25,
+    kl_loss_weight: float = 0.25,
+    encoder_loss_weight: float = 0.25,
+    decoder_loss_weight: float = 0.25,
 ):
     """Main function for distillation training"""
     
@@ -302,20 +359,7 @@ def main(
         tokenizer_kwargs = ast.literal_eval(tokenizer_kwargs)
         
     output_dir = get_next_path("distill", base_dir=output_dir, file_type="")
-    
-    # Load teacher model
-    log_on_main("Loading teacher model", logger)
-    dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
-    teacher = ChronosPipeline.from_pretrained(
-        teacher_model_path,
-        device_map="auto",
-        torch_dtype=dtype
-    )
-    teacher = teacher.model  # Extract the inner model for training
-    for param in teacher.parameters():
-        param.requires_grad = False
-    teacher.eval()  # Set to evaluation mode
-    # Load student model
+
     log_on_main("Initializing student model", logger)
     student = load_model(
         model_id=model_id,
@@ -326,9 +370,22 @@ def main(
         pad_token_id=pad_token_id,
         eos_token_id=eos_token_id,
     )
-    # Convert student model to same dtype as teacher
-    student = student.to(dtype=dtype)
-    
+
+
+
+    # Load teacher model
+    log_on_main("Loading teacher model", logger)
+    teacher = ChronosPipeline.from_pretrained(
+        teacher_model_path,
+        device_map="cuda",
+        torch_dtype=student.dtype
+    )
+    teacher = teacher.model  # Extract the inner model for training
+    for param in teacher.parameters():
+        param.requires_grad = False
+    teacher.eval()  # Set to evaluation mode
+    # Load student model
+
     # Create Chronos config
     chronos_config = ChronosConfig(
         tokenizer_class=tokenizer_class,
@@ -409,6 +466,10 @@ def main(
         temperature=distill_temperature,
         student_hidden_size=student_hidden_size,
         teacher_hidden_size=teacher_hidden_size,
+        task_loss_weight=task_loss_weight,
+        kl_loss_weight=kl_loss_weight,
+        encoder_loss_weight=encoder_loss_weight,
+        decoder_loss_weight=decoder_loss_weight,
     )
     
     # Train
