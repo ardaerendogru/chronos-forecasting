@@ -230,10 +230,10 @@ def main(
             .reset_index(drop=True)
             .to_dict(orient="records")
         )
+        print(metrics)
         result_rows.append(
             {"dataset": dataset_name, "model": chronos_model_id, **metrics[0]}
         )
-
     # Save results to a CSV file
     results_df = (
         pd.DataFrame(result_rows)

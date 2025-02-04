@@ -1,19 +1,19 @@
 training_data_paths:
-- "/home/ubuntu/tsmixup-data.arrow"
-- "/home/ubuntu/kernelsynth-data.arrow"
+- "/home/arda/Documents/chronos-forecasting/data/tsmixup-data-10percent.arrow"
+- "/home/arda/Documents/chronos-forecasting/data/kernelsynth-data-10percent.arrow"
 probability:
 - 0.9
 - 0.1
-context_length: 512
-prediction_length: 64
-min_past: 60
-max_steps: 200_000
-save_steps: 100_000
-log_steps: 500
+context_length: 256
+prediction_length: 32
+min_past: 30
+max_steps: 50_000
+save_steps: 10_000
+log_steps: 250
 per_device_train_batch_size: 32
 learning_rate: 0.001
 optim: adamw_torch_fused
-num_samples: 20
+num_samples: 10
 shuffle_buffer_length: 100_000
 gradient_accumulation_steps: 1
 model_id: google/t5-efficient-base

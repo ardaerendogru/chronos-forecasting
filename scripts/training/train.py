@@ -679,7 +679,7 @@ def main(
         ddp_find_unused_parameters=False,
         remove_unused_columns=False,
     )
-
+    log_on_main(f"Model dtype: {model.dtype}", logger)
     # Create Trainer instance
     trainer = Trainer(
         model=model,

@@ -163,6 +163,10 @@ cython_debug/
 .DS_store
 
 # output
-notebooks/output/
+notebooks/*
 data/*
 scripts/training/output/*
+notebooks/*.yaml
+scripts/training/distillation_old.py
+scripts/evaluation/results/*
+notes
