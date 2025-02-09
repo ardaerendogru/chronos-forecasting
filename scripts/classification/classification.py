@@ -14,7 +14,7 @@ from catboost import CatBoostClassifier
 class Classifier(nn.Module):
     def __init__(self, chronos_model, dataset_name, dropout, finetune, batch_size, device):
         super().__init__()
-        self.device = device  # store the device for later use
+        self.device = device  
         self.pipeline = self._load_chronos_model(chronos_model)
         
         input_dim = {
@@ -32,13 +32,13 @@ class Classifier(nn.Module):
 
         self.y_train = self.label_encoder.fit_transform(y_train)
         self.y_test = self.label_encoder.transform(y_test)
-        # Convert labels to tensor and directly place them on the device
+        
         y_train = torch.tensor(self.y_train,
                                dtype=torch.long).to(self.device)
         y_test = torch.tensor(self.y_test,
                               dtype=torch.long).to(self.device)
         
-        # Convert inputs to torch tensors and directly place them on the device
+        
         x_train_tensor = torch.tensor(x_train, dtype=torch.float32)
         x_test_tensor = torch.tensor(x_test, dtype=torch.float32)
 
@@ -74,7 +74,7 @@ class Classifier(nn.Module):
         ).to(self.device)
         
         self.finetune = finetune
-        # Update optimizer parameter groups based on whether finetuning should update the encoder too
+        
         if finetune:
             self.optimizer = optim.AdamW(
                 list(self.classification_head.parameters()) + list(self.pipeline.model.model.encoder.parameters()),
@@ -117,17 +117,17 @@ class Classifier(nn.Module):
         Train the classification head (and encoder if finetuning) for num_epochs.
         """
         for epoch in range(num_epochs):
-            self.train()  # set the model to training mode
+            self.train()  
             running_loss = 0.0
 
-            # Unpacking three items: inputs, attention_mask, and labels
+            
             for inputs, attention_mask, labels in self.train_loader:
                 inputs = inputs.to(self.device)
                 attention_mask = attention_mask.to(self.device)
                 labels = labels.to(self.device)
                 
-                # (Optional) debug print the shapes:
-                # print("inputs:", inputs.shape, "attention_mask:", attention_mask.shape, "labels:", labels.shape)
+                
+                
                 
                 self.optimizer.zero_grad()
                 
@@ -137,7 +137,7 @@ class Classifier(nn.Module):
                 ).mean(dim=1)
                 outputs = self.classification_head(features)
                 
-                # Debug: print the shapes of outputs and labels                
+                
                 loss = self.criterion(outputs, labels)
                 loss.backward()
                 self.optimizer.step()
@@ -148,21 +148,21 @@ class Classifier(nn.Module):
             print(f"Epoch {epoch+1}/{num_epochs} - Train Loss: {avg_train_loss:.4f} - Val Loss: {val_loss:.4f} - Val Acc: {val_accuracy:.4f}")
             self.scheduler.step(val_loss)
     def train_catboost(self):
-        # Create DataLoaders for feature extraction (no shuffling needed)
+        
         train_feature_dataset = TensorDataset(self.x_train_tensor, self.x_train_attention_mask)
-        train_feature_loader = DataLoader(train_feature_dataset, batch_size=32, shuffle=False) # No shuffle
+        train_feature_loader = DataLoader(train_feature_dataset, batch_size=32, shuffle=False) 
 
         test_feature_dataset = TensorDataset(self.x_test_tensor, self.x_test_attention_mask)
-        test_feature_loader = DataLoader(test_feature_dataset, batch_size=32, shuffle=False)   # No shuffle
+        test_feature_loader = DataLoader(test_feature_dataset, batch_size=32, shuffle=False)   
 
 
         train_features_list = []
         test_features_list = []
 
-        self.pipeline.model.to(self.device) # Ensure Chronos model is on the device for encoding
+        self.pipeline.model.to(self.device) 
 
-        self.pipeline.model.eval() # Set Chronos model to eval mode for inference
-        with torch.no_grad(): # Disable gradient calculations during feature extraction
+        self.pipeline.model.eval() 
+        with torch.no_grad(): 
             print("Extracting training features...")
             for batch_idx, (inputs, attention_mask) in enumerate(train_feature_loader):
                 inputs = inputs.to(self.device)
@@ -171,11 +171,11 @@ class Classifier(nn.Module):
                 batch_features = self.pipeline.model.encode(
                     input_ids=inputs,
                     attention_mask=attention_mask,
-                ).mean(dim=1) # Mean pool
+                ).mean(dim=1) 
 
-                train_features_list.append(batch_features.cpu().numpy()) # Move to CPU and store as numpy
+                train_features_list.append(batch_features.cpu().numpy()) 
 
-                if batch_idx % 10 == 0: # Print progress every 10 batches
+                if batch_idx % 10 == 0: 
                     print(f"  Processed training batch {batch_idx}")
 
             print("Extracting testing features...")
@@ -186,26 +186,26 @@ class Classifier(nn.Module):
                 batch_features = self.pipeline.model.encode(
                     input_ids=inputs,
                     attention_mask=attention_mask,
-                ).mean(dim=1) # Mean pool
+                ).mean(dim=1) 
 
-                test_features_list.append(batch_features.cpu().numpy()) # Move to CPU and store as numpy
-                if batch_idx % 10 == 0: # Print progress every 10 batches
+                test_features_list.append(batch_features.cpu().numpy()) 
+                if batch_idx % 10 == 0: 
                     print(f"  Processed testing batch {batch_idx}")
 
 
-        # Concatenate all batch features into single numpy arrays
+        
         features_train_np = np.concatenate(train_features_list, axis=0)
         features_test_np  = np.concatenate(test_features_list, axis=0)
-        y_train_np = self.y_train # Move labels to CPU as well
+        y_train_np = self.y_train 
         y_test_np  = self.y_test
 
 
         print("Training CatBoost...")
         self.catboost_model = CatBoostClassifier(
-                            iterations=1000,  # Increased iterations
-                            learning_rate=0.03, # Slightly smaller learning rate
-                            depth=6, # Slightly smaller depth (for less overfitting)
-                            l2_leaf_reg=3, # Increased regularization
+                            iterations=1000,  
+                            learning_rate=0.03, 
+                            depth=6, 
+                            l2_leaf_reg=3, 
                             loss_function='MultiClass',
                             eval_metric='Accuracy',
                             random_seed=42,
@@ -216,8 +216,8 @@ class Classifier(nn.Module):
 
         self.catboost_model.fit(features_train_np, y_train_np,
                                  eval_set=(features_test_np, y_test_np),
-                                 early_stopping_rounds=15, # Optional early stopping
-                                 verbose=True) # Set to False to reduce output
+                                 early_stopping_rounds=15, 
+                                 verbose=True) 
     def evaluate(self):
         """
         Evaluate the model on the test dataset.
@@ -249,24 +249,24 @@ class Classifier(nn.Module):
         accuracy = correct_predictions / len(self.test_loader.dataset)
         return avg_loss, accuracy
 
-import contextlib  # Add at the top with other imports
+import contextlib  
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # Define experiment parameters
+    
     datasets = ["ECG5000", "UWaveGestureLibraryX", "FordA"]
     model_sizes = ["tiny", "mini", "small"]
     finetune_options = [True, False]
     
-    # Common hyperparameters
+    
     dropout = 0.5
     batch_size = 4
     num_epochs = 100
 
     results_filename = "results.txt"
     
-    # Clear previous results and open the file in write mode
+    
     with open(results_filename, "w", buffering=1) as f:
         f.write("Chronos Classification Experiments Results\n")
         f.write("============================================\n")
@@ -277,20 +277,20 @@ def main():
             for finetune in finetune_options:
                 experiment_info = f"Experiment {experiment_counter}: Dataset={dataset}, Model={model_size}, Finetune={finetune}"
                 print(f"Starting {experiment_info}")
-                # Write header for this experiment
+                
                 with open(results_filename, "a", buffering=1) as f:
                     f.write("\n" + "=" * 50 + "\n")
                     f.write(experiment_info + "\n")
                 
-                # Redirect stdout and stderr to results.txt with line buffering
+                
                 with open(results_filename, "a", buffering=1) as f, \
                      contextlib.redirect_stdout(f), \
                      contextlib.redirect_stderr(f):
-                    # Initialize the classifier for the current settings
+                    
                     clf = Classifier(model_size, dataset, dropout, finetune, batch_size, device)
-                    # Train the classifier
+                    
                     clf._train(num_epochs=num_epochs)
-                    # Evaluate on the test set
+                    
                     test_loss, test_accuracy = clf.evaluate()
                     print(f"Final Evaluation - Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.4f}")
                 

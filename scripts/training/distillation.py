@@ -1,5 +1,5 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
+
+
 
 import ast
 import logging
@@ -105,7 +105,7 @@ class DistillationTrainer(Trainer):
         with torch.no_grad():
             teacher_outputs = self.teacher(**inputs, output_hidden_states=True)
         
-        # Get hidden states for distillation
+        
         student_encoder_hidden = outputs.encoder_last_hidden_state
         student_decoder_hidden = outputs.decoder_hidden_states[-1]
         student_logits = outputs.logits
@@ -113,7 +113,7 @@ class DistillationTrainer(Trainer):
         teacher_encoder_hidden = teacher_outputs.encoder_last_hidden_state
         teacher_decoder_hidden = teacher_outputs.decoder_hidden_states[-1]
         teacher_logits = teacher_outputs.logits
-        # Project student hidden states to teacher dimension
+        
         student_encoder_hidden = self.encoder_projection(student_encoder_hidden)
         student_decoder_hidden = self.decoder_projection(student_decoder_hidden)
         student_encoder_hidden = F.normalize(student_encoder_hidden, p=2, dim=-1)
@@ -122,7 +122,7 @@ class DistillationTrainer(Trainer):
         teacher_decoder_hidden = F.normalize(teacher_decoder_hidden, p=2, dim=-1)
 
         task_loss = outputs.loss
-        # Calculate hidden state distillation losses using MSE
+        
         encoder_loss = F.mse_loss(
             student_encoder_hidden,
             teacher_encoder_hidden,reduction='sum'
@@ -136,16 +136,16 @@ class DistillationTrainer(Trainer):
         student_lsm = F.log_softmax(student_logits / self.distillation_temperature, dim=-1)
         teacher_probs = F.softmax(teacher_logits / self.distillation_temperature, dim=-1)
         
-        # Create mask for valid labels (where labels != -100)
+        
         valid_mask = (inputs["labels"] != -100).unsqueeze(-1)
         
-        # Apply mask to both student and teacher outputs
+        
         masked_student_lsm = student_lsm * valid_mask
         masked_teacher_probs = teacher_probs * valid_mask
         
-        # Calculate masked distillation loss
+        
         distill_loss = -(masked_teacher_probs * masked_student_lsm).sum(dim=-1)
-        distill_loss = distill_loss[valid_mask.squeeze(-1)].mean()  # Only average over valid positions
+        distill_loss = distill_loss[valid_mask.squeeze(-1)].mean()  
         total_loss = self.task_loss_weight * task_loss + self.distill_loss_weight * distill_loss + self.encoder_loss_weight * encoder_loss + self.decoder_loss_weight * decoder_loss
         if self.args.average_tokens_across_devices and self.model_accepts_loss_kwargs:
             total_loss *= self.accelerator.num_processes
@@ -238,7 +238,7 @@ def get_training_job_info() -> Dict:
     """
     job_info = {}
 
-    # CUDA info
+    
     job_info["cuda_available"] = torch.cuda.is_available()
     if torch.cuda.is_available():
         job_info["device_count"] = torch.cuda.device_count()
@@ -252,13 +252,13 @@ def get_training_job_info() -> Dict:
             for idx in range(torch.cuda.device_count())
         }
 
-    # DDP info
+    
     job_info["torchelastic_launched"] = dist.is_torchelastic_launched()
 
     if dist.is_torchelastic_launched():
         job_info["world_size"] = dist.get_world_size()
 
-    # Versions
+    
     job_info["python_version"] = sys.version.replace("\n", " ")
     job_info["torch_version"] = torch.__version__
     job_info["numpy_version"] = np.__version__
@@ -294,13 +294,13 @@ def get_next_path(
     "results-2.yaml".
     """
     if file_type == "":
-        # Directory
+        
         items = filter(
             lambda x: x.is_dir() and re.match(f"^{base_fname}{separator}\\d+$", x.stem),
             base_dir.glob("*"),
         )
     else:
-        # File
+        
         items = filter(
             lambda x: re.match(f"^{base_fname}{separator}\\d+$", x.stem),
             base_dir.glob(f"*.{file_type}"),
@@ -341,7 +341,7 @@ def load_model(
         log_on_main("Using random initialization", logger)
         config = AutoConfig.from_pretrained(model_id)
         if isinstance(config, T5Config):
-            # The default initializer_factor (1.0) in transformers is too large
+            
             config.initializer_factor = 0.05
         config.tie_word_embeddings = tie_embeddings
         model = AutoModelClass.from_config(config)
@@ -498,8 +498,8 @@ class ChronosDataset(IterableDataset, ShuffleMixin):
         assert entry["target"].ndim == 1, f"got {entry['target'].ndim=}, expected 1"
 
         if self.model_type == "causal":
-            # Causal models do not play nice with missing values, so it is
-            # recommended to use an imputation method, e.g., LastValueImputation
+            
+            
             entry["target"] = self.imputation_method(entry["target"])
 
         if mode == "training" and self.drop_prob > 0:
@@ -566,14 +566,14 @@ class ChronosDataset(IterableDataset, ShuffleMixin):
         labels[labels_mask == 0] = -100
 
         if self.model_type == "causal":
-            # The InstanceSplitter pads time series on the left to be equal to the
-            # context_length. However, certain models (e.g., GPT2) with absolute
-            # position embeddings should not be trained with left padding.
-            # The following piece of code moves padding from left to right.
+            
+            
+            
+            
 
             assert input_ids.shape[-1] == entry["past_is_pad"].shape[0]
 
-            # Find the index where padding starts
+            
             pad_start_idx = np.searchsorted(1 - entry["past_is_pad"], 1)
             padded_input_ids, obs_input_ids = torch.tensor_split(
                 input_ids, [pad_start_idx], dim=-1
@@ -582,7 +582,7 @@ class ChronosDataset(IterableDataset, ShuffleMixin):
                 attention_mask, [pad_start_idx], dim=-1
             )
 
-            # Move padding to the right
+            
             input_ids = torch.cat(
                 [
                     obs_input_ids,
@@ -600,8 +600,8 @@ class ChronosDataset(IterableDataset, ShuffleMixin):
                 axis=-1,
             )
 
-            # labels for causal models are same as the input_ids.
-            # Internally transformers shifts the labels by one during training.
+            
+            
             labels = input_ids.clone()
             input_ids[~attention_mask] = self.tokenizer.config.pad_token_id
             labels[~attention_mask] = -100
@@ -713,9 +713,9 @@ def main(
     if tf32 and not (
         torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8
     ):
-        # TF32 floating point format is available only on NVIDIA GPUs
-        # with compute capability 8 and above. See link for details.
-        # https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#compute-capability-8-x
+        
+        
+        
         log_on_main(
             "TF32 format is only available on devices with compute capability >= 8. "
             "Setting tf32 to False.",
@@ -803,7 +803,7 @@ def main(
         eos_token_id=eos_token_id,
     )
 
-    # Load teacher model
+    
     log_on_main("Loading teacher model", logger)
     teacher = ChronosPipeline.from_pretrained(
         teacher_id,
@@ -813,7 +813,7 @@ def main(
 
     for param in teacher.parameters():
         param.requires_grad = False
-    teacher.eval()  # Set to evaluation mode
+    teacher.eval()  
 
     chronos_config = ChronosConfig(
         tokenizer_class=tokenizer_class,
@@ -832,7 +832,7 @@ def main(
         top_p=top_p,
     )
 
-    # Add extra items to model config so that it's saved in the ckpt
+    
     model.config.chronos_config = chronos_config.__dict__
 
     shuffled_train_dataset = ChronosDataset(
@@ -847,7 +847,7 @@ def main(
         mode="training",
     ).shuffle(shuffle_buffer_length=shuffle_buffer_length)
 
-    # Define training args
+    
     training_args = TrainingArguments(
         output_dir=str(output_dir),
         per_device_train_batch_size=per_device_train_batch_size,
@@ -864,13 +864,13 @@ def main(
         max_steps=max_steps,
         gradient_accumulation_steps=gradient_accumulation_steps,
         dataloader_num_workers=dataloader_num_workers,
-        tf32=tf32,  # remove this if not using Ampere GPUs (e.g., A100)
+        tf32=tf32,  
         torch_compile=torch_compile,
         ddp_find_unused_parameters=False,
         remove_unused_columns=False,
     )
     log_on_main(f"Model dtype: {model.dtype}", logger)
-    # Create Trainer instance
+    
     trainer = DistillationTrainer(
         model=model,
         args=training_args,
@@ -885,11 +885,11 @@ def main(
         decoder_loss_weight=decoder_loss_weight,
     )
 
-    # trainer = Trainer(
-    #     model=model,
-    #     args=training_args,
-    #     train_dataset=shuffled_train_dataset,
-    # )
+    
+    
+    
+    
+    
 
     log_on_main("Training", logger)
 
