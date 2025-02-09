@@ -8,187 +8,294 @@ from chronos import ChronosPipeline
 from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import train_test_split
 from sktime.datasets import load_from_tsfile_to_dataframe
+from sktime.datasets import load_UCR_UEA_dataset
+from catboost import CatBoostClassifier
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-MODEL_SIZES = ["tiny", "mini", "small", "base", "large"]
-
-# Simple classifier model
-class SimpleClassifier(nn.Module):
-    def __init__(self, input_dim, num_classes, dropout_rate=0.5):
+class Classifier(nn.Module):
+    def __init__(self, chronos_model, dataset_name, dropout, finetune, batch_size, device):
         super().__init__()
-        self.network = nn.Sequential(
+        self.device = device  # store the device for later use
+        self.pipeline = self._load_chronos_model(chronos_model)
+        
+        input_dim = {
+            "tiny": 256,
+            "mini": 384,
+            "small": 512,
+            "base": 768,
+            "large": 1024,
+        }.get(chronos_model)
+        self.label_encoder = LabelEncoder()
+
+        x_train, y_train, x_test, y_test = self._load_dataset(dataset_name)
+        x_train = np.array([x.values for x in x_train.iloc[:, 0]])
+        x_test = np.array([x.values for x in x_test.iloc[:, 0]])
+
+        self.y_train = self.label_encoder.fit_transform(y_train)
+        self.y_test = self.label_encoder.transform(y_test)
+        # Convert labels to tensor and directly place them on the device
+        y_train = torch.tensor(self.y_train,
+                               dtype=torch.long).to(self.device)
+        y_test = torch.tensor(self.y_test,
+                              dtype=torch.long).to(self.device)
+        
+        # Convert inputs to torch tensors and directly place them on the device
+        x_train_tensor = torch.tensor(x_train, dtype=torch.float32)
+        x_test_tensor = torch.tensor(x_test, dtype=torch.float32)
+
+
+
+        context_tensor = self.pipeline._prepare_and_validate_context(context=x_train_tensor)
+        x_train_tensor, x_train_attention_mask, tokenizer_state = (
+            self.pipeline.tokenizer.context_input_transform(context_tensor)
+        )
+
+        context_tensor = self.pipeline._prepare_and_validate_context(context=x_test_tensor)
+        x_test_tensor, x_test_attention_mask, tokenizer_state = (
+            self.pipeline.tokenizer.context_input_transform(context_tensor)
+        )
+        self.x_train_tensor = x_train_tensor
+        self.x_test_tensor = x_test_tensor
+        self.x_test_attention_mask = x_test_attention_mask
+        self.x_train_attention_mask = x_train_attention_mask
+        self.num_classes = len(torch.unique(y_train))
+        
+        self.classification_head = nn.Sequential(
             nn.Linear(input_dim, 128),
             nn.BatchNorm1d(128),
             nn.ReLU(),
-            nn.Dropout(dropout_rate),
+            nn.Dropout(dropout),
             
             nn.Linear(128, 64),
             nn.BatchNorm1d(64),
             nn.ReLU(),
-            nn.Dropout(dropout_rate),
+            nn.Dropout(dropout),
             
-            nn.Linear(64, num_classes)
+            nn.Linear(64, self.num_classes)
+        ).to(self.device)
+        
+        self.finetune = finetune
+        # Update optimizer parameter groups based on whether finetuning should update the encoder too
+        if finetune:
+            self.optimizer = optim.AdamW(
+                list(self.classification_head.parameters()) + list(self.pipeline.model.model.encoder.parameters()),
+                lr=5e-5,
+            )
+        else:
+            self.optimizer = optim.AdamW(
+                list(self.classification_head.parameters()),
+                lr=5e-3,
+            )
+        
+        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer, mode='min', factor=0.5, patience=10, verbose=True
         )
-    
-    def forward(self, x):
-        return self.network(x)
-    
-# Load the dataset
-def load_dataset(dataset_name):
-    allowed_datasets = ["ArrowHead", "BasicMotions", "GunPoint", "ItalyPowerDemand"]
-    if dataset_name not in allowed_datasets:
-        raise ValueError(f"dataset_name must be one of {allowed_datasets}")
-    print(f"Loading {dataset_name} dataset...")
-    from sktime.datasets import load_UCR_UEA_dataset
+        self.criterion = nn.CrossEntropyLoss()
 
-    X_train, y_train = load_UCR_UEA_dataset(name=dataset_name, split="train", return_X_y=True)
-    X_test, y_test = load_UCR_UEA_dataset(name=dataset_name, split="test", return_X_y=True)
-    print(f"Loaded {dataset_name} dataset!")
+        self.train_dataset = TensorDataset(x_train_tensor, x_train_attention_mask, y_train)
+        self.test_dataset  = TensorDataset(x_test_tensor, x_test_attention_mask, y_test)
+        self.train_loader  = DataLoader(self.train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
+        self.test_loader   = DataLoader(self.test_dataset, batch_size=batch_size, shuffle=False)
 
-    # Convert to numpy arrays
-    X_train = np.array([x.values for x in X_train.iloc[:, 0]])
-    X_test = np.array([x.values for x in X_test.iloc[:, 0]])
+    def _load_dataset(self, dataset_name):
+        print(f"Loading {dataset_name} dataset...")
+        X_train, y_train = load_UCR_UEA_dataset(name=dataset_name, split="train", return_X_y=True)
+        X_test, y_test = load_UCR_UEA_dataset(name=dataset_name, split="test", return_X_y=True)
+        return X_train, y_train, X_test, y_test
 
-    # Concatenate train and test sets, as we will split them later
-    X = np.concatenate((X_train, X_test), axis=0)
-    y = np.concatenate((y_train, y_test), axis=0)
-    return X, y
+    def _load_chronos_model(self, model_size):
+        print(f"Loading Chronos model ({model_size})...")
+        model_name = f"amazon/chronos-t5-{model_size}"
+        pipeline = ChronosPipeline.from_pretrained(
+            model_name,
+            device_map=self.device,
+            torch_dtype=torch.float32,
+        )
+        print(f"Loaded {model_name} model!")
+        return pipeline
+    def _train(self, num_epochs=50):
+        """
+        Train the classification head (and encoder if finetuning) for num_epochs.
+        """
+        for epoch in range(num_epochs):
+            self.train()  # set the model to training mode
+            running_loss = 0.0
 
-# Load the Chronos model
-def load_chronos_model(model_size):
-    if model_size not in MODEL_SIZES:
-        raise ValueError(f"model_size must be one of {MODEL_SIZES}")
-    print(f"Loading Chronos model ({model_size})...")
-    model_name = f"amazon/chronos-t5-{model_size}"
+            # Unpacking three items: inputs, attention_mask, and labels
+            for inputs, attention_mask, labels in self.train_loader:
+                inputs = inputs.to(self.device)
+                attention_mask = attention_mask.to(self.device)
+                labels = labels.to(self.device)
+                
+                # (Optional) debug print the shapes:
+                # print("inputs:", inputs.shape, "attention_mask:", attention_mask.shape, "labels:", labels.shape)
+                
+                self.optimizer.zero_grad()
+                
+                features = self.pipeline.model.encode(
+                    input_ids=inputs,
+                    attention_mask=attention_mask,
+                ).mean(dim=1)
+                outputs = self.classification_head(features)
+                
+                # Debug: print the shapes of outputs and labels                
+                loss = self.criterion(outputs, labels)
+                loss.backward()
+                self.optimizer.step()
+                running_loss += loss.item() * inputs.size(0)
+            
+            avg_train_loss = running_loss / len(self.train_loader.dataset)
+            val_loss, val_accuracy = self.evaluate()
+            print(f"Epoch {epoch+1}/{num_epochs} - Train Loss: {avg_train_loss:.4f} - Val Loss: {val_loss:.4f} - Val Acc: {val_accuracy:.4f}")
+            self.scheduler.step(val_loss)
+    def train_catboost(self):
+        # Create DataLoaders for feature extraction (no shuffling needed)
+        train_feature_dataset = TensorDataset(self.x_train_tensor, self.x_train_attention_mask)
+        train_feature_loader = DataLoader(train_feature_dataset, batch_size=32, shuffle=False) # No shuffle
 
-    pipeline = ChronosPipeline.from_pretrained(
-        model_name,
-        device_map=DEVICE,
-        torch_dtype=torch.bfloat16,
-    )
-    print(f"Loaded {model_name} model!")
-    return pipeline
+        test_feature_dataset = TensorDataset(self.x_test_tensor, self.x_test_attention_mask)
+        test_feature_loader = DataLoader(test_feature_dataset, batch_size=32, shuffle=False)   # No shuffle
 
-# Extract embeddings from a time series dataset using the Chronos model
-def extract_chronos_embeddings(time_series_list, extractor):
-    print(f"Extracting embeddings...")
-    # Convert to torch tensor if needed
-    if isinstance(time_series_list[0], np.ndarray):
-        time_series_list = [torch.tensor(x) for x in time_series_list]
-    
-    embeddings, _ = extractor.embed(time_series_list)
-    print(f"Extracted embeddings!")
-    
-    # Average pooling over the time dimension to get a fixed-size representation
-    embeddings_pooled = embeddings.mean(dim=1)
 
-    # Convert to float32 before moving to NumPy
-    return embeddings_pooled.to(torch.float32).cpu().numpy()
+        train_features_list = []
+        test_features_list = []
 
-# Train a simple classifier using the Chronos embeddings
-def train_classifier(X_embeddings, y_labels, num_epochs, batch_size):
-    label_encoder = LabelEncoder()
-    y_labels_encoded = label_encoder.fit_transform(y_labels)
-    X_embeddings = torch.FloatTensor(X_embeddings)
-    y_labels = torch.LongTensor(y_labels_encoded)
-    
-    X_train, X_test, y_train, y_test = train_test_split(X_embeddings, y_labels, test_size=0.3, random_state=42)
-    train_dataset = TensorDataset(X_train, y_train)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    
-    num_classes = len(torch.unique(y_labels))
-    model = SimpleClassifier(
-        input_dim=X_embeddings.shape[1],
-        num_classes=num_classes,
-        dropout_rate=0.5
-    ).to(DEVICE)
-    
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.01)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=10, verbose=True
-    )
-    
-    # Training loop
-    best_test_acc = 0
-    train_accuracies = []
-    test_accuracies = []
+        self.pipeline.model.to(self.device) # Ensure Chronos model is on the device for encoding
 
-    for epoch in range(num_epochs):
-        model.train()
-        train_loss = 0
+        self.pipeline.model.eval() # Set Chronos model to eval mode for inference
+        with torch.no_grad(): # Disable gradient calculations during feature extraction
+            print("Extracting training features...")
+            for batch_idx, (inputs, attention_mask) in enumerate(train_feature_loader):
+                inputs = inputs.to(self.device)
+                attention_mask = attention_mask.to(self.device)
+
+                batch_features = self.pipeline.model.encode(
+                    input_ids=inputs,
+                    attention_mask=attention_mask,
+                ).mean(dim=1) # Mean pool
+
+                train_features_list.append(batch_features.cpu().numpy()) # Move to CPU and store as numpy
+
+                if batch_idx % 10 == 0: # Print progress every 10 batches
+                    print(f"  Processed training batch {batch_idx}")
+
+            print("Extracting testing features...")
+            for batch_idx, (inputs, attention_mask) in enumerate(test_feature_loader):
+                inputs = inputs.to(self.device)
+                attention_mask = attention_mask.to(self.device)
+
+                batch_features = self.pipeline.model.encode(
+                    input_ids=inputs,
+                    attention_mask=attention_mask,
+                ).mean(dim=1) # Mean pool
+
+                test_features_list.append(batch_features.cpu().numpy()) # Move to CPU and store as numpy
+                if batch_idx % 10 == 0: # Print progress every 10 batches
+                    print(f"  Processed testing batch {batch_idx}")
+
+
+        # Concatenate all batch features into single numpy arrays
+        features_train_np = np.concatenate(train_features_list, axis=0)
+        features_test_np  = np.concatenate(test_features_list, axis=0)
+        y_train_np = self.y_train # Move labels to CPU as well
+        y_test_np  = self.y_test
+
+
+        print("Training CatBoost...")
+        self.catboost_model = CatBoostClassifier(
+                            iterations=1000,  # Increased iterations
+                            learning_rate=0.03, # Slightly smaller learning rate
+                            depth=6, # Slightly smaller depth (for less overfitting)
+                            l2_leaf_reg=3, # Increased regularization
+                            loss_function='MultiClass',
+                            eval_metric='Accuracy',
+                            random_seed=42,
+                            verbose=True,
+                            task_type="GPU",
+                            devices='0',
+                        )
+
+        self.catboost_model.fit(features_train_np, y_train_np,
+                                 eval_set=(features_test_np, y_test_np),
+                                 early_stopping_rounds=15, # Optional early stopping
+                                 verbose=True) # Set to False to reduce output
+    def evaluate(self):
+        """
+        Evaluate the model on the test dataset.
+        Returns average loss and accuracy.
+        """
+        self.eval()
+        total_loss = 0.0
+        correct_predictions = 0
         
-        for batch_X, batch_y in train_loader:
-            batch_X, batch_y = batch_X.to(DEVICE), batch_y.to(DEVICE)
-            
-            optimizer.zero_grad()
-            outputs = model(batch_X)
-            loss = criterion(outputs, batch_y)
-            
-            loss.backward()
-            optimizer.step()
-            
-            train_loss += loss.item()
-        
-        # Evaluation
-        model.eval()
         with torch.no_grad():
-            # Training accuracy
-            X_train_gpu = X_train.to(DEVICE)
-            train_outputs = model(X_train_gpu)
-            _, predicted = torch.max(train_outputs, 1)
-            train_acc = (predicted.cpu() == y_train).float().mean().item()
-            train_accuracies.append(train_acc)
-            
-            # Test accuracy
-            X_test_gpu = X_test.to(DEVICE)
-            test_outputs = model(X_test_gpu)
-            _, predicted = torch.max(test_outputs, 1)
-            test_acc = (predicted.cpu() == y_test).float().mean().item()
-            test_accuracies.append(test_acc)
-        
-        # Update learning rate
-        scheduler.step(train_loss)
-        
-        # Save best model
-        if test_acc > best_test_acc:
-            best_test_acc = test_acc
-            best_state = model.state_dict()
-        
-        # Print progress every 10 epochs
-        if (epoch + 1) % 10 == 0:
-            print(f'Epoch [{epoch+1}/{num_epochs}]')
-            print(f'Training accuracy: {train_acc:.3f}')
-            print(f'Test accuracy: {test_acc:.3f}')
-            print(f'Loss: {train_loss/len(train_loader):.4f}\n')
+            for inputs, attention_mask, labels in self.test_loader:
+                inputs = inputs.to(self.device)
+                attention_mask = attention_mask.to(self.device)
+                labels = labels.to(self.device)
+                
+                features = self.pipeline.model.encode(
+                        input_ids=inputs.to(self.device),
+                        attention_mask=attention_mask.to(self.device),
+                    ).mean(dim=1)
+                
+                outputs = self.classification_head(features)
+                loss = self.criterion(outputs, labels)
+                total_loss += loss.item() * inputs.size(0)
+                
+                preds = torch.argmax(outputs, dim=1)
+                correct_predictions += (preds == labels).sum().item()
+                
+        avg_loss = total_loss / len(self.test_loader.dataset)
+        accuracy = correct_predictions / len(self.test_loader.dataset)
+        return avg_loss, accuracy
+
+import contextlib  # Add at the top with other imports
+
+def main():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # Load best model
-    model.load_state_dict(best_state)
-    print(f'\nBest test accuracy: {best_test_acc:.3f}')
-
-    # Plot accuracies
-    plt.figure(figsize=(10, 5))
-    plt.plot(range(1, num_epochs + 1), train_accuracies, label='Train Accuracy', color='blue')
-    plt.plot(range(1, num_epochs + 1), test_accuracies, label='Test Accuracy', color='red')
-    plt.xlabel('Epochs')
-    plt.ylabel('Accuracy')
-    plt.title('Train and Test Accuracy over Epochs')
-    plt.legend()
-    plt.show()
+    # Define experiment parameters
+    datasets = ["ECG5000", "UWaveGestureLibraryX", "FordA"]
+    model_sizes = ["tiny", "mini", "small"]
+    finetune_options = [True, False]
     
-    return model
-
-def classify_embeddings_from_chronos(dataset_name):
-    X, y = load_dataset(dataset_name)
-
-    model_size = "tiny"
-    extractor = load_chronos_model(model_size)
-    X_embeddings = extract_chronos_embeddings(X, extractor)
-
+    # Common hyperparameters
+    dropout = 0.5
+    batch_size = 4
     num_epochs = 100
-    batch_size = 16
-    classifier = train_classifier(X_embeddings, y, num_epochs, batch_size)
+
+    results_filename = "results.txt"
+    
+    # Clear previous results and open the file in write mode
+    with open(results_filename, "w", buffering=1) as f:
+        f.write("Chronos Classification Experiments Results\n")
+        f.write("============================================\n")
+    
+    experiment_counter = 1
+    for dataset in datasets:
+        for model_size in model_sizes:
+            for finetune in finetune_options:
+                experiment_info = f"Experiment {experiment_counter}: Dataset={dataset}, Model={model_size}, Finetune={finetune}"
+                print(f"Starting {experiment_info}")
+                # Write header for this experiment
+                with open(results_filename, "a", buffering=1) as f:
+                    f.write("\n" + "=" * 50 + "\n")
+                    f.write(experiment_info + "\n")
+                
+                # Redirect stdout and stderr to results.txt with line buffering
+                with open(results_filename, "a", buffering=1) as f, \
+                     contextlib.redirect_stdout(f), \
+                     contextlib.redirect_stderr(f):
+                    # Initialize the classifier for the current settings
+                    clf = Classifier(model_size, dataset, dropout, finetune, batch_size, device)
+                    # Train the classifier
+                    clf._train(num_epochs=num_epochs)
+                    # Evaluate on the test set
+                    test_loss, test_accuracy = clf.evaluate()
+                    print(f"Final Evaluation - Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.4f}")
+                
+                print(f"Finished {experiment_info}")
+                experiment_counter += 1
 
 if __name__ == "__main__":
-    dataset_name = "ArrowHead" # "ArrowHead", "BasicMotions", "GunPoint", "ItalyPowerDemand"
-    classify_embeddings_from_chronos(dataset_name)
+    main()

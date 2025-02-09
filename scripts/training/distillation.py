@@ -135,10 +135,18 @@ class DistillationTrainer(Trainer):
         
         student_lsm = F.log_softmax(student_logits / self.distillation_temperature, dim=-1)
         teacher_probs = F.softmax(teacher_logits / self.distillation_temperature, dim=-1)
-        distill_loss = -(teacher_probs * student_lsm).sum(dim=-1).mean()
-
+        
+        # Create mask for valid labels (where labels != -100)
+        valid_mask = (inputs["labels"] != -100).unsqueeze(-1)
+        
+        # Apply mask to both student and teacher outputs
+        masked_student_lsm = student_lsm * valid_mask
+        masked_teacher_probs = teacher_probs * valid_mask
+        
+        # Calculate masked distillation loss
+        distill_loss = -(masked_teacher_probs * masked_student_lsm).sum(dim=-1)
+        distill_loss = distill_loss[valid_mask.squeeze(-1)].mean()  # Only average over valid positions
         total_loss = self.task_loss_weight * task_loss + self.distill_loss_weight * distill_loss + self.encoder_loss_weight * encoder_loss + self.decoder_loss_weight * decoder_loss
-
         if self.args.average_tokens_across_devices and self.model_accepts_loss_kwargs:
             total_loss *= self.accelerator.num_processes
 
