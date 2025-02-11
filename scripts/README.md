@@ -1,153 +1,137 @@
-# Usage Examples
+# Chronos Distillation and Classification
 
-## Generating Synthetic Time Series (KernelSynth)
+This repository contains two primary components that leverage Chronos models for time series tasks:
 
-- Install this package with with the `training` extra:
-    ```
-    pip install "chronos-forecasting[training] @ git+https://github.com/amazon-science/chronos-forecasting.git"
-    ```
-- Run `kernel-synth.py`:
-    ```sh
-    # With defaults used in the paper (1M time series and 5 max_kernels)
-    python kernel-synth.py
+1. **Distillation Training:**  
+   A training script that uses knowledge distillation to transfer knowledge from a large teacher model to a smaller student model. The implementation is found in [scripts/training/distillation.py](scripts/training/distillation.py).
 
-    # You may optionally specify num-series and max-kernels
-    python kernel-synth.py \
-        --num-series <num of series to generate> \
-        --max-kernels <max number of kernels to use per series>
-    ```
-    The generated time series will be saved in a [GluonTS](https://github.com/awslabs/gluonts)-comptabile arrow file `kernelsynth-data.arrow`.
-
-## Pretraining (and fine-tuning) Chronos models
-- Install this package with with the `training` extra:
-    ```
-    pip install "chronos-forecasting[training] @ git+https://github.com/amazon-science/chronos-forecasting.git"
-    ```
-- Convert your time series dataset into a GluonTS-compatible file dataset. We recommend using the arrow format. You may use the `convert_to_arrow` function from the following snippet for that. Optionally, you may use [synthetic data from KernelSynth](#generating-synthetic-time-series-kernelsynth) to follow along.
-    ```py
-    from pathlib import Path
-    from typing import List, Union
-
-    import numpy as np
-    from gluonts.dataset.arrow import ArrowWriter
+2. **Classification Experiments:**  
+   A classification pipeline that utilizes a Chronos model to extract features from time series data and then trains a classifier for various UCR/UEA classification datasets. See [scripts/classification/classification.py](scripts/classification/classification.py) for the full implementation.
 
 
-    def convert_to_arrow(
-        path: Union[str, Path],
-        time_series: Union[List[np.ndarray], np.ndarray],
-        compression: str = "lz4",
-    ):
-        """
-        Store a given set of series into Arrow format at the specified path.
+## Installation
 
-        Input data can be either a list of 1D numpy arrays, or a single 2D
-        numpy array of shape (num_series, time_length).
-        """
-        assert isinstance(time_series, list) or (
-            isinstance(time_series, np.ndarray) and
-            time_series.ndim == 2
-        )
+Clone the repository and install the dependencies via pip:
+```bash
+git clone https://github.com/ardaerendogru/chronos-forecasting.git
+cd chronos-forecasting
+pip install -r requirements.txt
+```
 
-        # Set an arbitrary start time
-        start = np.datetime64("2000-01-01 00:00", "s")
+---
 
-        dataset = [
-            {"start": start, "target": ts} for ts in time_series
-        ]
+## Usage
 
-        ArrowWriter(compression=compression).write_to_file(
-            dataset,
-            path=path,
-        )
+### Distillation Training
 
+The distillation script trains a student model using both task-specific loss and a distillation loss derived from a frozen teacher model. It uses a custom `DistillationTrainer` that extends the HuggingFace Trainer and supports multiple hyperparameters.
 
-    if __name__ == "__main__":
-        # Generate 20 random time series of length 1024
-        time_series = [np.random.randn(1024) for i in range(20)]
+A sample YAML configuration is provided in [scripts/training/configs/distillation.yaml](scripts/training/configs/distillation.yaml). To start training with distillation, run:
 
-        # Convert to GluonTS arrow format
-        convert_to_arrow("./noise-data.arrow", time_series=time_series)
-    ```
-- Modify the [training configs](training/configs) to use your data. Let's use the KernelSynth data as an example.
-    ```yaml
-    # List of training data files
-    training_data_paths:
-    - "/path/to/kernelsynth-data.arrow"
-    # Mixing probability of each dataset file
-    probability:
-    - 1.0
-    ```
-    You may optionally change other parameters of the config file, as required. For instance, if you're interested in fine-tuning the model from a pretrained Chronos checkpoint, you should change the `model_id`, set `random_init: false`, and (optionally) change other parameters such as `max_steps` and `learning_rate`.
-- Start the training (or fine-tuning) job:
-    ```sh
-    # On single GPU
-    CUDA_VISIBLE_DEVICES=0 python training/train.py --config /path/to/modified/config.yaml
+```bash
+python scripts/training/distillation.py --config scripts/training/configs/distillation.yaml
+```
 
-    # On multiple GPUs (example with 8 GPUs)
-    torchrun --nproc-per-node=8 training/train.py --config /path/to/modified/config.yaml
+Key configuration parameters include:
+- **model_id:** Identifier for the student model (e.g., "google/t5-efficient-tiny").
+- **teacher_id / teacher_model_path:** Identifier/path for the teacher model (e.g., "amazon/chronos-t5-small" or "amazon/chronos-t5-mini").
+- **distillation_temperature:** Temperature to scale logits for distillation.
+- **learning_rate, batch_size, context_length, prediction_length, etc.:** Additional hyperparameters for training.
 
-    # Fine-tune `amazon/chronos-t5-small` for 1000 steps with initial learning rate of 1e-3
-    CUDA_VISIBLE_DEVICES=0 python training/train.py --config /path/to/modified/config.yaml \
-        --model-id amazon/chronos-t5-small \
-        --no-random-init \
-        --max-steps 1000 \
-        --learning-rate 0.001
-    ```
-    The output and checkpoints will be saved in `output/run-{id}/`.
-> [!TIP]  
-> If the initial training step is too slow, you might want to change the `shuffle_buffer_length` and/or set `torch_compile` to `false`.
+### Classification Experiments
 
-> [!IMPORTANT]  
-> When pretraining causal models (such as GPT2), the training script does [`LastValueImputation`](https://github.com/awslabs/gluonts/blob/f0f2266d520cb980f4c1ce18c28b003ad5cd2599/src/gluonts/transform/feature.py#L103) for missing values by default. If you pretrain causal models, please ensure that missing values are imputed similarly before passing the context tensor to `ChronosPipeline.predict()` for accurate results.
-- (Optional) Once trained, you can easily push your fine-tuned model to HuggingFace🤗 Hub. Before that, do not forget to [create an access token](https://huggingface.co/settings/tokens) with **write permissions** and put it in `~/.cache/huggingface/token`. Here's a snippet that will push a fine-tuned model to HuggingFace🤗 Hub at `<your_hf_username>/chronos-t5-small-fine-tuned`.
-    ```py
-    from chronos import ChronosPipeline
+The classification experiments script loads a Chronos model and uses it to extract features from time series data (from UCR/UEA datasets). A simple neural network classification head is then trained on these features. The script also supports experiments with CatBoost for a non-deep-learning alternative.
 
-    pipeline = ChronosPipeline.from_pretrained("/path/to/fine-tuned/model/ckpt/dir/")
-    pipeline.model.model.push_to_hub("chronos-t5-small-fine-tuned")
-    ```
+Run the classification experiments as follows:
 
-## Evaluating Chronos models
+```bash
+python scripts/classification/classification.py
+```
 
-Follow these steps to compute the WQL and MASE values for the in-domain and zero-shot benchmarks in our paper.
+Within the script, various experiment settings are looped over:
+- **Datasets:** e.g., `["ECG5000", "UWaveGestureLibraryX", "FordA"]`
+- **Model Sizes:** e.g., `"tiny"`, `"mini"`, and `"small"`
+- **Finetuning Options:** either fine-tuning the encoder or freezing it
 
-- Install this package with with the `evaluation` extra:
-    ```
-    pip install "chronos-forecasting[evaluation] @ git+https://github.com/amazon-science/chronos-forecasting.git"
-    ```
-- Run the evaluation script:
-    ```sh
-    # In-domain evaluation
-    # Results will be saved in: evaluation/results/chronos-t5-small-in-domain.csv
-    python evaluation/evaluate.py evaluation/configs/in-domain.yaml evaluation/results/chronos-t5-small-in-domain.csv \
-        --chronos-model-id "amazon/chronos-t5-small" \
-        --batch-size=32 \
-        --device=cuda:0 \
-        --num-samples 20
+Results and logs are written to a file called `results.txt`.
 
-    # Zero-shot evaluation
-    # Results will be saved in: evaluation/results/chronos-t5-small-zero-shot.csv
-    python evaluation/evaluate.py evaluation/configs/zero-shot.yaml evaluation/results/chronos-t5-small-zero-shot.csv \
-        --chronos-model-id "amazon/chronos-t5-small" \
-        --batch-size=32 \
-        --device=cuda:0 \
-        --num-samples 20
-    ```
-- Use the following snippet to compute the aggregated relative WQL and MASE scores:
-    ```py
-    import pandas as pd
-    from scipy.stats import gmean  # requires: pip install scipy
+---
+
+## Configuration Details
+
+### Distillation Example Configuration (YAML)
+
+Below is an example from [scripts/training/configs/distillation.yaml](scripts/training/configs/distillation.yaml):
+
+```yaml
+training_data_paths:
+- "./data/tsmixup-data-10percent.arrow"
+- "./kernelsynth-data-10percent.arrow"
+probability:
+- 0.9
+- 0.1
+context_length: 512
+prediction_length: 64
+min_past: 60
+max_steps: 100_000
+save_steps: 25_000
+log_steps: 250
+per_device_train_batch_size: 32
+learning_rate: 0.001
+optim: adamw_torch_fused
+num_samples: 20
+shuffle_buffer_length: 100_000
+gradient_accumulation_steps: 1
+model_id: google/t5-efficient-tiny
+model_type: seq2seq
+random_init: true
+tie_embeddings: true
+output_dir: ./output/
+tf32: false
+torch_compile: true
+tokenizer_class: "MeanScaleUniformBins"
+tokenizer_kwargs:
+  low_limit: -15.0
+  high_limit: 15.0
+n_tokens: 4096
+lr_scheduler_type: linear
+warmup_ratio: 0.0
+dataloader_num_workers: 1
+max_missing_prop: 0.9
+use_eos_token: true
+
+teacher_id: amazon/chronos-t5-small
+distillation_temperature: 2.0
+task_loss_weight: 0.5
+distill_loss_weight: 0.5
+encoder_loss_weight: 0.0025
+decoder_loss_weight: 0.025
 
 
-    def agg_relative_score(model_df: pd.DataFrame, baseline_df: pd.DataFrame):
-        relative_score = model_df.drop("model", axis="columns") / baseline_df.drop(
-            "model", axis="columns"
-        )
-        return relative_score.agg(gmean)
+```
+
+### Classification Configuration
+
+The classification script is self-contained and allows you to adjust parameters directly within the code. Key configurable parameters include:
+- **Dataset names:** (e.g., `"ECG5000"`, `"UWaveGestureLibraryX"`, `"FordA"`)
+- **Chronos model sizes:** (e.g., `"tiny"`, `"mini"`, `"small"`)
+- **Finetuning settings:** Whether to fine-tune the Chronos encoder alongside the classification head
+- **Hyperparameters:** dropout rates, batch sizes, number of training epochs, etc.
+
+---
+
+## Project Structure
+
+```
+.
+├── scripts
+│   ├── training
+│   │   ├── distillation.py
+│   │   └── configs
+│   │       └── distillation.yaml
+│   └── classification
+│       └── classification.py
+└── README.md
+```
 
 
-    result_df = pd.read_csv("evaluation/results/chronos-t5-small-in-domain.csv").set_index("dataset")
-    baseline_df = pd.read_csv("evaluation/results/seasonal-naive-in-domain.csv").set_index("dataset")
-
-    agg_score_df = agg_relative_score(result_df, baseline_df)
-    ```
